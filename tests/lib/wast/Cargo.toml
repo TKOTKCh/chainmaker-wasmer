@@ -1,0 +1,35 @@
+[package]
+name = "wasmer-wast"
+version = "6.0.1"
+authors = ["Wasmer Engineering Team <engineering@wasmer.io>"]
+description = "wast testing support for wasmer"
+license = "MIT OR Apache-2.0 WITH LLVM-exception"
+categories = ["wasm"]
+keywords = ["wasm", "webassembly"]
+repository = "https://github.com/wasmerio/wasmer"
+readme = "README.md"
+edition = "2018"
+
+[dependencies]
+wasmer-types = { path = "../../../lib/types", version = "=6.0.1" }
+wasmer-wasix = { path = "../../../lib/wasix", version = "=0.600.1" }
+wasmer = { path = "../../../lib/api", version = "=6.0.1", default-features = false }
+virtual-fs = { path = "../../../lib/virtual-fs", version = "0.600.1" }
+
+anyhow = "1.0"
+wast = "221.0.2"
+serde = "1"
+tempfile = "3.6.0"
+thiserror = "1.0"
+futures = "0.3"
+tokio = { workspace = true, features = [
+	"io-util",
+	"rt",
+], default-features = false }
+
+[features]
+default = ["wat"]
+wat = ["wasmer/wat"]
+
+[badges]
+maintenance = { status = "actively-developed" }

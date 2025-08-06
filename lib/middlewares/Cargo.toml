@@ -1,0 +1,33 @@
+[package]
+name = "wasmer-middlewares"
+description = "A collection of various useful middlewares"
+categories = ["wasm"]
+keywords = ["webassembly", "wasm"]
+readme = "README.md"
+authors.workspace = true
+edition.workspace = true
+homepage.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+wasmer = { path = "../api", version = "=6.0.1", default-features = false, features = [
+	"compiler",
+	"wasmparser",
+] }
+wasmer-types = { path = "../types", version = "=6.0.1" }
+wasmer-vm = { path = "../vm", version = "=6.0.1" }
+
+[dev-dependencies]
+wasmer = { path = "../api", version = "=6.0.1", features = [
+	"compiler",
+	"wasmparser",
+] }
+
+[badges]
+maintenance = { status = "actively-developed" }
+
+[package.metadata.docs.rs]
+rustc-args = ["--cfg", "docsrs"]
