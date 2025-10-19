@@ -7,7 +7,7 @@
 //!
 //! [See the `metering` detailed and complete
 //! example](https://github.com/wasmerio/wasmer/blob/main/examples/metering.rs).
-
+use regex::Regex; // 需要引入 regex 库
 use std::collections::HashSet;
 use std::convert::TryInto;
 use std::fmt;
@@ -57,6 +57,7 @@ pub struct ChainMakerMetering<F: Fn(&Operator) -> u64 + Send + Sync> {
     global_indexes: Mutex<Option<MeteringGlobalIndexes>>,
     runtime_funcs: Mutex<HashSet<String>>, // 存储 runtime 函数索引
     func_names: Mutex<Vec<String>>, // ✅ 新增：保存所有函数名
+    func_name_match: Option<String>,
 }
 
 /// The module-level metering middleware.
@@ -115,7 +116,9 @@ pub struct FunctionMetering<F: Fn(&Operator) -> u64 + Send + Sync> {
     /// Accumulated cost of the current basic block.
     accumulated_cost: u64,
 
-    skip: bool, // ✅ 是否跳过 metering
+    skip: bool, // 是否跳过常规metering 按指令计费
+
+    name: String
 }
 
 /// Represents the type of the metering points, either `Remaining` or
@@ -153,13 +156,16 @@ impl<F: Fn(&Operator) -> u64 + Send + Sync> Metering<F> {
 }
 
 impl<F: Fn(&Operator) -> u64 + Send + Sync> ChainMakerMetering<F> {
-    pub fn new(initial_limit: u64, cost_function: F) -> Self {
+    pub fn new(initial_limit: u64, cost_function: F,function_match: Option<String>) -> Self {
+        let func_name_match = function_match.map(|s| s.to_string()); // 转为 Option<String>
+
         Self {
             initial_limit,
             cost_function: Arc::new(cost_function),
             global_indexes: Mutex::new(None),
             runtime_funcs: Mutex::new(HashSet::new()),
             func_names: Mutex::new(vec![]),
+            func_name_match, // 存储 Option<String>
         }
     }
 }
@@ -190,26 +196,86 @@ fn strip_last_suffix(name: &str) -> &str {
         name
     }
 }
+fn is_go_compiler_func(name: &str) -> bool {
+    const GO_RUNTIME_PREFIXES: &[&str] = &[
+        "runtime", "internal", "reflect",
+        "sync", "type", "itab",
+        "go.func.", "go.string.", "gcWriteBarrier","io",
+        "memmove", "memclrNoHeapPointers","go_"
+    ];
+
+    GO_RUNTIME_PREFIXES.iter().any(|p| name.contains(p))
+}
+
+fn is_user_code(name: &str, func_name_match: Option<&String>) -> bool {
+    let name_lower = name.to_lowercase();
+    //先判断是否是go编译器的runtime相关的函数
+    if is_go_compiler_func(&name_lower) {
+        return false
+    }
+    // 如果 func_name_match 存在且非空，尝试编译为正则表达式并匹配
+    let custom_match = func_name_match
+        .filter(|pattern| !pattern.is_empty())
+        .and_then(|pattern| Regex::new(pattern).ok()) // 编译正则表达式（忽略错误）
+        .map_or(false, |regex| regex.is_match(&name_lower)); // 正则匹配
+
+    // 如果 custom_match 为 true，直接返回 true；否则检查固定规则
+    custom_match || {
+        name.starts_with("main.")
+            ||name.starts_with("json")
+            ||name.starts_with("math")
+            ||name.starts_with("strings")
+            ||name.starts_with("encoding")
+            ||name.starts_with("time")
+            ||name.starts_with("fmt")
+            || name_lower.contains("chainmaker")
+            || name_lower.contains("sdk")
+            || name.is_empty()
+    }
+}
+
+use std::collections::HashMap;
+use std::ffi::CStr;
+use std::os::raw::c_char;
+use lazy_static::lazy_static;
+
+lazy_static! {
+    static ref FUNCTION_VALUE_MAP: HashMap<&'static str, u64> = {
+        let mut map = HashMap::new();
+        // map.insert("strconv.ParseInt", 726);
+        // map.insert("encoding_json.Marshal", 504903);
+        // map.insert("encoding_json.Unmarshal", 1208204);
+        map
+    };
+}
+
+fn get_fixed_value(name: &str) -> Option<u64> {
+    FUNCTION_VALUE_MAP.get(name).copied()
+}
 impl<F: Fn(&Operator) -> u64 + Send + Sync + 'static> ModuleMiddleware for ChainMakerMetering<F> {
     /// Generates a `FunctionMiddleware` for a given function.
     fn generate_function_middleware(&self, func_idx: LocalFunctionIndex) -> Box<dyn FunctionMiddleware> {
         let func_names = self.func_names.lock().unwrap();
         let idx = func_idx.as_u32() as usize;
         let name = func_names.get(idx).cloned().unwrap_or_default();
-        let skip = {
-            name.starts_with("runtime")
-        };
+        let skip = !is_user_code(&name,self.func_name_match.as_ref());
+        // let skip=is_go_compiler_func(&name);
         // println!(
-        //     "skip:{} mapped_name='{}' func_idx={} ",
+        //     "skip:{} mapped_name='{}' func_idx={} {}",
         //     skip,
         //     name,
         //     func_idx.as_u32(),
+        //     match get_fixed_value(&name) {
+        //         Some(value) => format!("preset_value={}", value),
+        //         None => "no_preset".to_string(),
+        //     }
         // );
         Box::new(FunctionMetering {
             cost_function: self.cost_function.clone(),
             global_indexes: self.global_indexes.lock().unwrap().clone().unwrap(),
             accumulated_cost: 0,
             skip,
+            name,
         })
     }
 
@@ -222,15 +288,27 @@ impl<F: Fn(&Operator) -> u64 + Send + Sync + 'static> ModuleMiddleware for Chain
         }
 
         // 1. 扫描并获取函数名
+        // chenhang 特别注意LocalFunctionIndex和wasm解析出来的FunctionIndex不一定一致！！！二者中间差着imported_functions
+        // generate_function_middleware里面传过来的是LocalFunctionIndex
         let mut func_names = self.func_names.lock().unwrap();
         func_names.clear();
         func_names.resize(module_info.functions.len(), String::new());
-
         for (idx, name) in module_info.function_names.iter() {
-            let local_idx = idx.as_u32() as usize;
-            if local_idx < func_names.len() {
-                // println!("module function '{}'", name);
-                func_names[local_idx] = name.clone();
+            // 获取 Option<LocalFunctionIndex>
+            let local_function_index = module_info.local_func_index(*idx);
+            if let Some(local_idx) = local_function_index {
+                // 直接访问元组结构体的内部字段 `.0`，并转换为 usize
+                let local_idx_usize = local_idx.as_u32() as usize;
+                if local_idx_usize < func_names.len() {
+                    // println!(
+                    //     "module function '{}' local_function_index '{}'",
+                    //     name, local_idx_usize
+                    // );
+                    func_names[local_idx_usize] = name.clone();
+                }
+            } else {
+                // 如果 local_function_index 是 None，说明是 imported function，可以打印警告或跳过
+                println!("Warning: Function '{}' is an imported function (no local index)", name);
             }
         }
 
@@ -239,22 +317,19 @@ impl<F: Fn(&Operator) -> u64 + Send + Sync + 'static> ModuleMiddleware for Chain
             func_names.resize(module_info.functions.len(), String::new());
         }
 
-        //TODO chenhang:是否真的需要runtime_funcs?感觉可以删除
+        // //TODO chenhang:是否真的需要runtime_funcs?感觉可以删除
         let mut runtime_funcs = self.runtime_funcs.lock().unwrap();
         for (name, export) in module_info.exports.iter() {
             if let ExportIndex::Function(_) = export {
                 // println!("Exporting function '{}'", name);
-                if name.starts_with("runtime") {
-                    runtime_funcs.insert(name.clone());
-                }
             }
         }
-
 
         // Append a global for remaining points and initialize it.
         let remaining_points_global_index = module_info
             .globals
             .push(GlobalType::new(Type::I64, Mutability::Var));
+
 
         module_info
             .global_initializers
@@ -296,6 +371,7 @@ impl<F: Fn(&Operator) -> u64 + Send + Sync + 'static> ModuleMiddleware for Meter
             global_indexes: self.global_indexes.lock().unwrap().clone().unwrap(),
             accumulated_cost: 0,
             skip: false,
+            name: "".to_string(),
         })
     }
 
@@ -388,6 +464,14 @@ impl<F: Fn(&Operator) -> u64 + Send + Sync> fmt::Debug for FunctionMetering<F> {
             .finish()
     }
 }
+lazy_static! {
+    static ref SEEN_FUNCTIONS: Mutex<HashMap<String, bool>> = Mutex::new(HashMap::new());
+}
+
+// if self.name.to_lowercase().contains("normalCal"){
+//     println!("normalCal: {}",self.accumulated_cost);
+// }
+// 输出
 
 impl<F: Fn(&Operator) -> u64 + Send + Sync> FunctionMiddleware for FunctionMetering<F> {
     fn feed<'a>(
@@ -395,8 +479,14 @@ impl<F: Fn(&Operator) -> u64 + Send + Sync> FunctionMiddleware for FunctionMeter
         operator: Operator<'a>,
         state: &mut MiddlewareReaderState<'a>,
     ) -> Result<(), MiddlewareError> {
+        // let mut seen_functions = SEEN_FUNCTIONS.lock().unwrap();
+        // if !seen_functions.contains_key(&self.name) {
+        //     // println!("FunctionMetering: {} skip:{}", self.name,self.skip);
+        //     seen_functions.insert(self.name.clone(), true);
+        // }
+        // 跳过带skip标签函数的
         if self.skip {
-            self.accumulated_cost=0;
+            self.accumulated_cost = get_fixed_value(&self.name).unwrap_or(0);
             state.push_operator(operator);
             return Ok(());
         }
