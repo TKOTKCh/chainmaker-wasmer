@@ -20,7 +20,15 @@ wasmer 内置了singlepass、Cranelift、LLVM三种后端编译器，其中，Si
 
 ![image-20251125001518250](./assets/image-20251125001518250.png)
 
-### 安装LLVM 18
+### MACOS 安装LLVM 18
+
+```shell
+brew install llvm@18
+```
+
+
+
+### Ubuntu/Debian 安装LLVM 18 
 
 #### **官方安装**
 
@@ -71,7 +79,9 @@ sudo apt install -y \
     libclang-rt-18-dev libpolly-18-dev
 ```
 
-### 编译采用LLVM的wasmer
+
+
+### 编译 LLVM的wasmer
 
 ```
 make build-capi-llvm
