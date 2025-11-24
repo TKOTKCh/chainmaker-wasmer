@@ -207,6 +207,14 @@ fn is_go_compiler_func(name: &str) -> bool {
     GO_RUNTIME_PREFIXES.iter().any(|p| name.contains(p))
 }
 
+fn black_list(name: &str) -> bool {
+    const GO_RUNTIME_PREFIXES: &[&str] = &[
+        "fmt.init"
+    ];
+
+    GO_RUNTIME_PREFIXES.iter().any(|p| name.contains(p))
+}
+
 fn is_user_code(name: &str, func_name_match: Option<&String>) -> bool {
     let name_lower = name.to_lowercase();
     //先判断是否是go编译器的runtime相关的函数
@@ -219,15 +227,22 @@ fn is_user_code(name: &str, func_name_match: Option<&String>) -> bool {
         .and_then(|pattern| Regex::new(pattern).ok()) // 编译正则表达式（忽略错误）
         .map_or(false, |regex| regex.is_match(&name_lower)); // 正则匹配
 
+
+    // // 如果是库函数（如 json、math、strings 等），且不包含 "init"，则返回 true
+    // let is_library_func = name.starts_with("json")
+    //     || name.starts_with("math")
+    //     || name.starts_with("strings")
+    //     || name.starts_with("encoding")
+    //     || name.starts_with("time")
+    //     || name.starts_with("fmt");
+    //
+    // if is_library_func && !name_lower.contains("init") {
+    //     return true;
+    // }
+
     // 如果 custom_match 为 true，直接返回 true；否则检查固定规则
     custom_match || {
         name.starts_with("main.")
-            ||name.starts_with("json")
-            ||name.starts_with("math")
-            ||name.starts_with("strings")
-            ||name.starts_with("encoding")
-            ||name.starts_with("time")
-            ||name.starts_with("fmt")
             || name_lower.contains("chainmaker")
             || name_lower.contains("sdk")
             || name.is_empty()
@@ -240,17 +255,82 @@ use std::os::raw::c_char;
 use lazy_static::lazy_static;
 
 lazy_static! {
-    static ref FUNCTION_VALUE_MAP: HashMap<&'static str, u64> = {
+    static ref PREFIX_VALUE_MAP: HashMap<&'static str, u64> = {
         let mut map = HashMap::new();
-        // map.insert("strconv.ParseInt", 726);
-        // map.insert("encoding_json.Marshal", 504903);
-        // map.insert("encoding_json.Unmarshal", 1208204);
+        // 定义前缀和对应的固定值
+        // map.insert("encoding_json", 1000);
+        // map.insert("fmt",1000);
+        // map.insert("math", 1000);
+        // map.insert("json", 1000);
+        // map.insert("strconv", 1000);
+        // map.insert("strings", 1000);
+
+        // map.insert("encoding_json.Marshal", 2000);
+        // // map.insert("encoding_json.Unmarshal", 1000);
+        // map.insert("fmt.Errorf",1000);
+        // map.insert("fmt.Sprintf",1000);
+        // // map.insert("math_big", 1000);
+        // map.insert("strconv.ParseInt", 1000);
+        // map.insert("strconv.FormatInt", 1000);
+        // // map.insert("strings.IndexRune", 1000);
+        // map.insert("strings.Join", 1000);
+        // map.insert("strings.TrimRightFunc", 1000);
+        // map.insert("strings.TrimFunc", 1000);
+        // map.insert("strings.TrimSpace", 1000);
+        // map.insert("strings.lastIndexFunc", 1000);
+
+
+        // map.insert("fmt",1000);
+        // map.insert("encoding_json",1000);
+        // map.insert("string",1000);
+        // map.insert("strconv",1000);
+        map.insert("math",1000);
+        map.insert("crypto",1000);
+
+        // map.insert("encoding_json.Marshal", 2000);
+        // map.insert("encoding_json.Unmarshal", 1000);
+        map.insert("fmt.Errorf",1000);
+        map.insert("fmt.Sprintf",1000);
+        // map.insert("math_big", 1000);
+        map.insert("strconv.ParseInt", 1000);
+        map.insert("strconv.FormatInt", 1000);
+        // map.insert("strings.IndexRune", 1000);
+        map.insert("strings.Join", 1000);
+        map.insert("strings.TrimRightFunc", 1000);
+        map.insert("strings.TrimFunc", 1000);
+        map.insert("strings.TrimSpace", 1000);
+        map.insert("strings.lastIndexFunc", 1000);
+
+
         map
     };
 }
 
+
+/// 检查函数名是否匹配某个前缀，并返回对应的固定值
 fn get_fixed_value(name: &str) -> Option<u64> {
-    FUNCTION_VALUE_MAP.get(name).copied()
+
+    if name.contains("encoding_json.__decodeState_.u"){
+        return None
+    }
+    if name.contains("init") ||name.contains("reset"){
+        return None
+    }
+    for (prefix, value) in PREFIX_VALUE_MAP.iter() {
+
+        if prefix.contains('.') {
+            // 如果 prefix 包含 '.', 则要求完全匹配
+            if name == *prefix {
+                return Some(*value);
+            }
+        } else {
+            // 如果 prefix 不包含 '.', 则检查 starts_with
+            if name.starts_with(prefix) {
+                return Some(*value);
+            }
+        }
+    }
+    None
 }
 impl<F: Fn(&Operator) -> u64 + Send + Sync + 'static> ModuleMiddleware for ChainMakerMetering<F> {
     /// Generates a `FunctionMiddleware` for a given function.
@@ -258,17 +338,26 @@ impl<F: Fn(&Operator) -> u64 + Send + Sync + 'static> ModuleMiddleware for Chain
         let func_names = self.func_names.lock().unwrap();
         let idx = func_idx.as_u32() as usize;
         let name = func_names.get(idx).cloned().unwrap_or_default();
+        // let skip=false;
         let skip = !is_user_code(&name,self.func_name_match.as_ref());
         // let skip=is_go_compiler_func(&name);
+
+        let info = if skip {
+            // 如果是非用户代码（skip=true），检查是否有预设值
+            match get_fixed_value(&name) {
+                Some(value) => format!("preset_value={}", value), // 返回预设值
+                None => "no_preset".to_string(), // 无预设值，返回默认
+            }
+        } else {
+            // 如果是用户代码（skip=false），返回 "instrument"
+            "instrument".to_string()
+        };
         // println!(
         //     "skip:{} mapped_name='{}' func_idx={} {}",
         //     skip,
         //     name,
         //     func_idx.as_u32(),
-        //     match get_fixed_value(&name) {
-        //         Some(value) => format!("preset_value={}", value),
-        //         None => "no_preset".to_string(),
-        //     }
+        //     info
         // );
         Box::new(FunctionMetering {
             cost_function: self.cost_function.clone(),
@@ -472,7 +561,10 @@ lazy_static! {
 //     println!("normalCal: {}",self.accumulated_cost);
 // }
 // 输出
-
+lazy_static! {
+    // 静态 HashMap，用于记录函数名和调用次数
+    static ref FUNCTION_CALL_COUNTS: Mutex<HashMap<String, usize>> = Mutex::new(HashMap::new());
+}
 impl<F: Fn(&Operator) -> u64 + Send + Sync> FunctionMiddleware for FunctionMetering<F> {
     fn feed<'a>(
         &mut self,
@@ -484,10 +576,53 @@ impl<F: Fn(&Operator) -> u64 + Send + Sync> FunctionMiddleware for FunctionMeter
         //     // println!("FunctionMetering: {} skip:{}", self.name,self.skip);
         //     seen_functions.insert(self.name.clone(), true);
         // }
+        // 记录当前函数的调用次数
+        let is_first_in = {
+            let mut counts = FUNCTION_CALL_COUNTS.lock().unwrap();
+            let entry = counts.entry(self.name.clone()).or_insert(0);
+            *entry += 1;
+            *entry == 1 // 如果是第一次调用，返回 true
+        };
+
         // 跳过带skip标签函数的
         if self.skip {
             self.accumulated_cost = get_fixed_value(&self.name).unwrap_or(0);
             state.push_operator(operator);
+            // 如果是第一次扫描该函数，插入计量检查逻辑
+            if is_first_in && self.accumulated_cost > 0{
+                state.extend(&[
+                    // if unsigned(globals[remaining_points_index]) < unsigned(self.accumulated_cost) { throw(); }
+                    Operator::GlobalGet {
+                        global_index: self.global_indexes.remaining_points().as_u32(),
+                    },
+                    Operator::I64Const {
+                        value: self.accumulated_cost as i64,
+                    },
+                    Operator::I64LtU,
+                    Operator::If {
+                        blockty: WpTypeOrFuncType::Empty,
+                    },
+                    Operator::I32Const { value: 1 },
+                    Operator::GlobalSet {
+                        global_index: self.global_indexes.points_exhausted().as_u32(),
+                    },
+                    Operator::Unreachable,
+                    Operator::End,
+                    // globals[remaining_points_index] -= self.accumulated_cost;
+                    Operator::GlobalGet {
+                        global_index: self.global_indexes.remaining_points().as_u32(),
+                    },
+                    Operator::I64Const {
+                        value: self.accumulated_cost as i64,
+                    },
+                    Operator::I64Sub,
+                    Operator::GlobalSet {
+                        global_index: self.global_indexes.remaining_points().as_u32(),
+                    },
+                ]);
+
+                self.accumulated_cost = 0;
+            }
             return Ok(());
         }
         // Get the cost of the current operator, and add it to the accumulator.
@@ -497,6 +632,7 @@ impl<F: Fn(&Operator) -> u64 + Send + Sync> FunctionMiddleware for FunctionMeter
         self.accumulated_cost += (self.cost_function)(&operator);
 
         // Finalize the cost of the previous basic block and perform necessary checks.
+        //基本块结尾，插桩
         if is_accounting(&operator) && self.accumulated_cost > 0 {
             state.extend(&[
                 // if unsigned(globals[remaining_points_index]) < unsigned(self.accumulated_cost) { throw(); }
@@ -537,6 +673,18 @@ impl<F: Fn(&Operator) -> u64 + Send + Sync> FunctionMiddleware for FunctionMeter
     }
 }
 
+// impl<F: Fn(&Operator) -> u64 + Send + Sync> FunctionMetering<F> {
+//     fn inject_function_name_log(&self, state: &mut MiddlewareReaderState) {
+//         // 假设宿主环境提供了一个 `env.log(str_ptr: i32, str_len: i32)` 函数
+//         let func_name = self.name.clone();
+//         state.extend(&[
+//             // 将函数名字符串指针和长度压栈（需在宿主环境实现）
+//             Operator::I32Const { value: func_name.as_ptr() as i32 }, // 实际需内存地址
+//             Operator::I32Const { value: func_name.len() as i32 },
+//             Operator::Call { function_index: LOG_FUNCTION_INDEX }, // 宿主环境导入的函数索引
+//         ]);
+//     }
+// }
 /// Get the remaining points in an [`Instance`][wasmer::Instance].
 ///
 /// Note: This can be used in a headless engine after an ahead-of-time

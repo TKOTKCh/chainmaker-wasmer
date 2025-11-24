@@ -148,6 +148,23 @@ fn native_sha256(mut ctx: FunctionEnvMut<ExampleEnv>, input_ptr: i32, input_len:
     // 返回 0 表示成功,-1 表示失败
     0
 }
+
+/// native_log_func 实现, 测试metering插桩用，插桩加入输出函数名字
+fn native_log_func(mut ctx: FunctionEnvMut<ExampleEnv>, input_ptr: i32, input_len: i32) -> i32 {
+    // 获取 WASM 内存视图
+    let view = ctx.data().view(&ctx);
+
+    // 读取字符串
+    let input_data = match read_string(&view, input_ptr, input_len) {
+        Ok(s) => s,
+        Err(_) => return -1,//读取字符串失败
+    };
+
+    // 打印日志
+    println!("Function called: {}", input_data);
+    // 返回 0 表示成功
+    0
+}
 /// Native parse_int 实现, 等价于go的strconv.ParesInt，支持进制转换
 /// 将字符串转换成int64
 fn native_parse_int64(
@@ -396,6 +413,8 @@ impl Instance {
         let native_sha_extern = Extern::Function(native_sha);
         let native_parse_int64 = Function::new_typed_with_env(store, &function_env, crate::entities::instance::native_parse_int64);
         let native_parse_int64_extern = Extern::Function(native_parse_int64);
+        let native_log_func = Function::new_typed_with_env(store, &function_env, crate::entities::instance::native_log_func);
+        let native_log_func_extern = Extern::Function(native_log_func);
         let native_big_exp = Function::new_typed_with_env(store, &function_env, crate::entities::instance::native_big_exp);
         let native_big_exp_extern = Extern::Function(native_big_exp);
 
@@ -414,6 +433,10 @@ impl Instance {
         injected_funcs.insert(
             ("env".to_string(), "native_big_exp".to_string()),
             native_big_exp_extern,
+        );
+        injected_funcs.insert(
+            ("env".to_string(), "native_log_func".to_string()),
+            native_log_func_extern,
         );
         let mut flag=false;
         // 遍历 module 的导入项，逐个构造对应的 Extern
