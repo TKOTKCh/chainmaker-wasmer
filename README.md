@@ -18,7 +18,7 @@ wasmer 内置了singlepass、Cranelift、LLVM三种后端编译器，其中，Si
 
 考虑到长安链使用场景，合约部署时vm_pool只用编译一次，故可以采用LLVM后端获得最快的运行速度，而不用担心编译开销：
 
-![image-20251125001518250](.\assets\image-20251125001518250.png)
+![image-20251125001518250](./assets/image-20251125001518250.png)
 
 ### 安装LLVM 18
 
