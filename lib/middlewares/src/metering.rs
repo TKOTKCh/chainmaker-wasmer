@@ -22,6 +22,7 @@ use wasmer::{
 use wasmer_types::{GlobalIndex, ModuleInfo,FunctionIndex};
 
 
+
 #[derive(Clone)]
 struct MeteringGlobalIndexes(GlobalIndex, GlobalIndex);
 
@@ -50,15 +51,6 @@ impl fmt::Debug for MeteringGlobalIndexes {
     }
 }
 
-/// ✅ Go 版本的 Metering，中途跳过 runtime 函数
-pub struct ChainMakerMetering<F: Fn(&Operator) -> u64 + Send + Sync> {
-    initial_limit: u64,
-    cost_function: Arc<F>,
-    global_indexes: Mutex<Option<MeteringGlobalIndexes>>,
-    runtime_funcs: Mutex<HashSet<String>>, // 存储 runtime 函数索引
-    func_names: Mutex<Vec<String>>, // ✅ 新增：保存所有函数名
-    func_name_match: Option<String>,
-}
 
 /// The module-level metering middleware.
 ///
@@ -104,11 +96,23 @@ pub struct Metering<F: Fn(&Operator) -> u64 + Send + Sync> {
     /// The global indexes for metering points.
     global_indexes: Mutex<Option<MeteringGlobalIndexes>>,
 }
+/// ✅ Go 版本的 Metering，中途跳过 runtime 函数
+pub struct ChainMakerMetering<F: Fn(&Operator) -> u64 + Send + Sync> {
+    initial_limit: u64,
+    cost_function: Arc<F>,
+    fn_cost_function: Arc<dyn Fn(*const c_char) -> u64 + Send + Sync>, // 函数预订价
+    global_indexes: Mutex<Option<MeteringGlobalIndexes>>,
+    func_names: Mutex<Vec<String>>, // ✅ 新增：保存所有函数名
+    func_name_match: Option<String>,
+}
 
 /// The function-level metering middleware.
 pub struct FunctionMetering<F: Fn(&Operator) -> u64 + Send + Sync> {
     /// Function that maps each operator to a cost in "points".
     cost_function: Arc<F>,
+
+    /// 函数预订价
+    fn_cost_function: Arc<dyn Fn(*const c_char) -> u64 + Send + Sync>,
 
     /// The global indexes for metering points.
     global_indexes: MeteringGlobalIndexes,
@@ -156,14 +160,14 @@ impl<F: Fn(&Operator) -> u64 + Send + Sync> Metering<F> {
 }
 
 impl<F: Fn(&Operator) -> u64 + Send + Sync> ChainMakerMetering<F> {
-    pub fn new(initial_limit: u64, cost_function: F,function_match: Option<String>) -> Self {
+    pub fn new(initial_limit: u64, cost_function: F,fn_cost_function: impl Fn(*const c_char) -> u64 + Send + Sync + 'static,function_match: Option<String>) -> Self {
         let func_name_match = function_match.map(|s| s.to_string()); // 转为 Option<String>
 
         Self {
             initial_limit,
             cost_function: Arc::new(cost_function),
+            fn_cost_function: Arc::new(fn_cost_function),
             global_indexes: Mutex::new(None),
-            runtime_funcs: Mutex::new(HashSet::new()),
             func_names: Mutex::new(vec![]),
             func_name_match, // 存储 Option<String>
         }
@@ -227,19 +231,6 @@ fn is_user_code(name: &str, func_name_match: Option<&String>) -> bool {
         .and_then(|pattern| Regex::new(pattern).ok()) // 编译正则表达式（忽略错误）
         .map_or(false, |regex| regex.is_match(&name_lower)); // 正则匹配
 
-
-    // // 如果是库函数（如 json、math、strings 等），且不包含 "init"，则返回 true
-    // let is_library_func = name.starts_with("json")
-    //     || name.starts_with("math")
-    //     || name.starts_with("strings")
-    //     || name.starts_with("encoding")
-    //     || name.starts_with("time")
-    //     || name.starts_with("fmt");
-    //
-    // if is_library_func && !name_lower.contains("init") {
-    //     return true;
-    // }
-
     // 如果 custom_match 为 true，直接返回 true；否则检查固定规则
     custom_match || {
         name.starts_with("main.")
@@ -253,37 +244,37 @@ use std::collections::HashMap;
 use std::ffi::CStr;
 use std::os::raw::c_char;
 use lazy_static::lazy_static;
+// 定义前缀和对应的固定值
+// map.insert("encoding_json", 1000);
+// map.insert("fmt",1000);
+// map.insert("math", 1000);
+// map.insert("json", 1000);
+// map.insert("strconv", 1000);
+// map.insert("strings", 1000);
 
+// map.insert("encoding_json.Marshal", 2000);
+// // map.insert("encoding_json.Unmarshal", 1000);
+// map.insert("fmt.Errorf",1000);
+// map.insert("fmt.Sprintf",1000);
+// // map.insert("math_big", 1000);
+// map.insert("strconv.ParseInt", 1000);
+// map.insert("strconv.FormatInt", 1000);
+// // map.insert("strings.IndexRune", 1000);
+// map.insert("strings.Join", 1000);
+// map.insert("strings.TrimRightFunc", 1000);
+// map.insert("strings.TrimFunc", 1000);
+// map.insert("strings.TrimSpace", 1000);
+// map.insert("strings.lastIndexFunc", 1000);
+
+
+// map.insert("fmt",1000);
+// map.insert("encoding_json",1000);
+// map.insert("string",1000);
+// map.insert("strconv",1000);
 lazy_static! {
     static ref PREFIX_VALUE_MAP: HashMap<&'static str, u64> = {
         let mut map = HashMap::new();
-        // 定义前缀和对应的固定值
-        // map.insert("encoding_json", 1000);
-        // map.insert("fmt",1000);
-        // map.insert("math", 1000);
-        // map.insert("json", 1000);
-        // map.insert("strconv", 1000);
-        // map.insert("strings", 1000);
 
-        // map.insert("encoding_json.Marshal", 2000);
-        // // map.insert("encoding_json.Unmarshal", 1000);
-        // map.insert("fmt.Errorf",1000);
-        // map.insert("fmt.Sprintf",1000);
-        // // map.insert("math_big", 1000);
-        // map.insert("strconv.ParseInt", 1000);
-        // map.insert("strconv.FormatInt", 1000);
-        // // map.insert("strings.IndexRune", 1000);
-        // map.insert("strings.Join", 1000);
-        // map.insert("strings.TrimRightFunc", 1000);
-        // map.insert("strings.TrimFunc", 1000);
-        // map.insert("strings.TrimSpace", 1000);
-        // map.insert("strings.lastIndexFunc", 1000);
-
-
-        // map.insert("fmt",1000);
-        // map.insert("encoding_json",1000);
-        // map.insert("string",1000);
-        // map.insert("strconv",1000);
         map.insert("math",1000);
         map.insert("crypto",1000);
 
@@ -348,6 +339,8 @@ impl<F: Fn(&Operator) -> u64 + Send + Sync + 'static> ModuleMiddleware for Chain
                 Some(value) => format!("preset_value={}", value), // 返回预设值
                 None => "no_preset".to_string(), // 无预设值，返回默认
             }
+
+
         } else {
             // 如果是用户代码（skip=false），返回 "instrument"
             "instrument".to_string()
@@ -361,6 +354,7 @@ impl<F: Fn(&Operator) -> u64 + Send + Sync + 'static> ModuleMiddleware for Chain
         // );
         Box::new(FunctionMetering {
             cost_function: self.cost_function.clone(),
+            fn_cost_function:self.fn_cost_function.clone(),
             global_indexes: self.global_indexes.lock().unwrap().clone().unwrap(),
             accumulated_cost: 0,
             skip,
@@ -389,10 +383,6 @@ impl<F: Fn(&Operator) -> u64 + Send + Sync + 'static> ModuleMiddleware for Chain
                 // 直接访问元组结构体的内部字段 `.0`，并转换为 usize
                 let local_idx_usize = local_idx.as_u32() as usize;
                 if local_idx_usize < func_names.len() {
-                    // println!(
-                    //     "module function '{}' local_function_index '{}'",
-                    //     name, local_idx_usize
-                    // );
                     func_names[local_idx_usize] = name.clone();
                 }
             } else {
@@ -406,8 +396,8 @@ impl<F: Fn(&Operator) -> u64 + Send + Sync + 'static> ModuleMiddleware for Chain
             func_names.resize(module_info.functions.len(), String::new());
         }
 
-        // //TODO chenhang:是否真的需要runtime_funcs?感觉可以删除
-        let mut runtime_funcs = self.runtime_funcs.lock().unwrap();
+
+
         for (name, export) in module_info.exports.iter() {
             if let ExportIndex::Function(_) = export {
                 // println!("Exporting function '{}'", name);
@@ -452,62 +442,63 @@ impl<F: Fn(&Operator) -> u64 + Send + Sync + 'static> ModuleMiddleware for Chain
     }
 }
 
-impl<F: Fn(&Operator) -> u64 + Send + Sync + 'static> ModuleMiddleware for Metering<F> {
-    /// Generates a `FunctionMiddleware` for a given function.
-    fn generate_function_middleware(&self, _: LocalFunctionIndex) -> Box<dyn FunctionMiddleware> {
-        Box::new(FunctionMetering {
-            cost_function: self.cost_function.clone(),
-            global_indexes: self.global_indexes.lock().unwrap().clone().unwrap(),
-            accumulated_cost: 0,
-            skip: false,
-            name: "".to_string(),
-        })
-    }
-
-    /// Transforms a `ModuleInfo` struct in-place. This is called before application on functions begins.
-    fn transform_module_info(&self, module_info: &mut ModuleInfo) -> Result<(), MiddlewareError> {
-        let mut global_indexes = self.global_indexes.lock().unwrap();
-
-        if global_indexes.is_some() {
-            panic!("Metering::transform_module_info: Attempting to use a `Metering` middleware from multiple modules.");
-        }
-
-        // Append a global for remaining points and initialize it.
-        let remaining_points_global_index = module_info
-            .globals
-            .push(GlobalType::new(Type::I64, Mutability::Var));
-
-        module_info
-            .global_initializers
-            .push(GlobalInit::I64Const(self.initial_limit as i64));
-
-        module_info.exports.insert(
-            "wasmer_metering_remaining_points".to_string(),
-            ExportIndex::Global(remaining_points_global_index),
-        );
-
-        // Append a global for the exhausted points boolean and initialize it.
-        let points_exhausted_global_index = module_info
-            .globals
-            .push(GlobalType::new(Type::I32, Mutability::Var));
-
-        module_info
-            .global_initializers
-            .push(GlobalInit::I32Const(0));
-
-        module_info.exports.insert(
-            "wasmer_metering_points_exhausted".to_string(),
-            ExportIndex::Global(points_exhausted_global_index),
-        );
-
-        *global_indexes = Some(MeteringGlobalIndexes(
-            remaining_points_global_index,
-            points_exhausted_global_index,
-        ));
-
-        Ok(())
-    }
-}
+// 原始wasmer metering 已废弃，换成ChainMakerMetering
+// impl<F: Fn(&Operator) -> u64 + Send + Sync + 'static> ModuleMiddleware for Metering<F> {
+//     /// Generates a `FunctionMiddleware` for a given function.
+//     fn generate_function_middleware(&self, _: LocalFunctionIndex) -> Box<dyn FunctionMiddleware> {
+//         Box::new(FunctionMetering {
+//             cost_function: self.cost_function.clone(),
+//             global_indexes: self.global_indexes.lock().unwrap().clone().unwrap(),
+//             accumulated_cost: 0,
+//             skip: false,
+//             name: "".to_string(),
+//         })
+//     }
+//
+//     /// Transforms a `ModuleInfo` struct in-place. This is called before application on functions begins.
+//     fn transform_module_info(&self, module_info: &mut ModuleInfo) -> Result<(), MiddlewareError> {
+//         let mut global_indexes = self.global_indexes.lock().unwrap();
+//
+//         if global_indexes.is_some() {
+//             panic!("Metering::transform_module_info: Attempting to use a `Metering` middleware from multiple modules.");
+//         }
+//
+//         // Append a global for remaining points and initialize it.
+//         let remaining_points_global_index = module_info
+//             .globals
+//             .push(GlobalType::new(Type::I64, Mutability::Var));
+//
+//         module_info
+//             .global_initializers
+//             .push(GlobalInit::I64Const(self.initial_limit as i64));
+//
+//         module_info.exports.insert(
+//             "wasmer_metering_remaining_points".to_string(),
+//             ExportIndex::Global(remaining_points_global_index),
+//         );
+//
+//         // Append a global for the exhausted points boolean and initialize it.
+//         let points_exhausted_global_index = module_info
+//             .globals
+//             .push(GlobalType::new(Type::I32, Mutability::Var));
+//
+//         module_info
+//             .global_initializers
+//             .push(GlobalInit::I32Const(0));
+//
+//         module_info.exports.insert(
+//             "wasmer_metering_points_exhausted".to_string(),
+//             ExportIndex::Global(points_exhausted_global_index),
+//         );
+//
+//         *global_indexes = Some(MeteringGlobalIndexes(
+//             remaining_points_global_index,
+//             points_exhausted_global_index,
+//         ));
+//
+//         Ok(())
+//     }
+// }
 
 /// Returns `true` if and only if the given operator is an accounting operator.
 /// Accounting operators do additional work to track the metering points.
@@ -587,6 +578,10 @@ impl<F: Fn(&Operator) -> u64 + Send + Sync> FunctionMiddleware for FunctionMeter
         // 跳过带skip标签函数的
         if self.skip {
             self.accumulated_cost = get_fixed_value(&self.name).unwrap_or(0);
+            // // 找函数预订价
+            // let c_str = std::ffi::CString::new(self.name.as_bytes()).unwrap();
+            // self.accumulated_cost = (self.fn_cost_function)(c_str.as_ptr());
+            // self.accumulated_cost= (self.)(&operator);
             state.push_operator(operator);
             // 如果是第一次扫描该函数，插入计量检查逻辑
             if is_first_in && self.accumulated_cost > 0{

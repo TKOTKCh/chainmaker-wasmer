@@ -131,6 +131,8 @@
 //! # }
 //! ```
 
+use std::ffi::CStr;
+use std::os::raw::c_char;
 use super::super::super::instance::wasm_instance_t;
 use super::super::parser::operator::wasmer_parser_operator_t;
 use super::wasmer_middleware_t;
@@ -162,6 +164,11 @@ pub struct wasmer_metering_t {
 pub type wasmer_metering_cost_function_t =
     extern "C" fn(wasm_operator: wasmer_parser_operator_t) -> u64;
 
+/// Function type for function name cost calculation (*const c_char → u64)
+/// 函数预订价
+#[allow(non_camel_case_types)]
+pub type wasmer_metering_fn_cost_function_t = extern "C" fn(*const c_char) -> u64;
+
 /// Creates a new metering middleware with an initial limit, i.e. a
 /// total number of operators to execute (regarding their respective
 /// cost), in addition to a cost function. The cost function defines
@@ -174,11 +181,27 @@ pub type wasmer_metering_cost_function_t =
 //chenhang 改为ChainMakerMetering，取消runtime的gas计量
 pub extern "C" fn wasmer_metering_new(
     initial_limit: u64,
-    cost_function: wasmer_metering_cost_function_t
+    cost_function: wasmer_metering_cost_function_t,
+    fn_cost_function: wasmer_metering_fn_cost_function_t,
+    function_match: *const c_char,
 ) -> Box<wasmer_metering_t> {
     let cost_function = move |operator: &Operator| -> u64 { cost_function(operator.into()) };
+
+    // 包装 fn_cost_function函数名预订价
+    let func_cost_fn = move |func_name: *const c_char| -> u64 {
+        fn_cost_function(func_name)
+    };
+
+    // 将 *const c_char 转换为 Option<String>
+    // 转换为 Option<String>
+    let func_name_match = if function_match.is_null() {
+        None
+    } else {
+        let c_str = unsafe { CStr::from_ptr(function_match) };
+        c_str.to_str().ok().map(|s| s.to_string()) // 失败时返回 None
+    };
     Box::new(wasmer_metering_t {
-        inner: Arc::new(ChainMakerMetering::new(initial_limit, Box::new(cost_function))),
+        inner: Arc::new(ChainMakerMetering::new(initial_limit, Box::new(cost_function),func_cost_fn,func_name_match)),
     })
 
 
