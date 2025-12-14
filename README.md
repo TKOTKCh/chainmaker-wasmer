@@ -3,13 +3,36 @@
 ```sh
 $ make build-capi-cranelift
 $ cp target/release/libwasmer.dylib vm-wasmer的目录/wasmer-go/packaged/对应架构/libwasmer.dylib
+$ # 如果要在其他系统上使用，使用静态链接的结果
+$ cp target/release/libwasmer.a vm-wasmer的目录/wasmer-go/packaged/对应架构/libwasmer.a
 ```
 
 ### Linux 下编译成 libwasmer.so 库
 
 ```sh
 $ make build-capi-cranelift
+$ # 如果只是在本地使用，使用动态链接的结果即可
 $ cp target/release/libwasmer.so vm-wasmer的目录/wasmer-go/packaged/对应架构/libwasmer.so
+$ # 如果要在其他系统上使用，使用静态链接的结果
+$ cp target/release/libwasmer.a vm-wasmer的目录/wasmer-go/packaged/对应架构/libwasmer.a
+```
+
+### 使用musl进行静态链接【可选】
+
+大部分的Linux发行版使用的C标准函数库是glibc，但由于glibc版本问题，同样的已编译好的函数库和运行档在不同的Linux上可能无法共用，要分别编译或者用某种方式打包起来才行（静态链接），文件较重。
+
+而musl libc是C语言的一种标准函数库，可以看作glibc的轻量化版本，专门针对静态连接设计，适合被用来制作可携带的程序，且也很容易进行交叉编译出运行在不同系统环境的程序，比glibc的静态链接更轻，但是缺点是musl跟glibc实现有一些不一致，比如无法使用musl直接编译llvm，要使用musl版本的llvm才能编译。
+
+Wasmer提供使用musl的编译配置，但需要额外安装musl的环境。
+
+```shell
+# 安装musl交叉编译工具链
+rustup target add x86_64-unknown-linux-musl
+
+# 对于Ubuntu/Debian系统
+sudo apt-get install musl-tools
+
+RUSTFLAGS="-C target-feature=+crt-static" make build-capi-cranelift CARGO_TARGET=x86_64-unknown-linux-musl
 ```
 
 ### wasmer使用LLVM后端 【可选】
