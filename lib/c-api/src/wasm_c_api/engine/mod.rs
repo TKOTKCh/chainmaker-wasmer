@@ -176,6 +176,7 @@ pub struct wasm_config_t {
     pub(super) backend_config: wasmer_backend_config_t,
     pub(super) features: Option<Box<wasmer_features_t>>,
     pub(super) max_memory_pages: u32,
+    // pub(super) function_match: Option<String>, // 新增字段，Option<String> 表示可选
 }
 
 /// Create a new default Wasmer configuration.
@@ -284,6 +285,30 @@ pub extern "C" fn wasm_config_set_backend(config: &mut wasm_config_t, engine: wa
 pub extern "C" fn wasm_config_set_max_pages(config: &mut wasm_config_t, max_memory_pages: u32) {
     config.max_memory_pages = max_memory_pages;
 }
+
+// #[no_mangle]
+// pub extern "C" fn wasm_config_set_function_match(
+//     config: &mut wasm_config_t,
+//     function_match: *const c_char,
+// ) {
+//     if function_match.is_null() {
+//         // 如果 Go 传 NULL，则设置为 None（表示未设置）
+//         config.function_match = None;
+//     } else {
+//         // 否则将 C 字符串转换为 Rust String
+//         let c_str = unsafe { CStr::from_ptr(function_match) };
+//         match c_str.to_str() {
+//             Ok(rust_str) => {
+//                 config.function_match = Some(rust_str.to_string());
+//             }
+//             Err(_) => {
+//                 // 处理 UTF-8 转换错误（可选：记录日志或 panic）
+//                 config.function_match = None;
+//             }
+//         }
+//     }
+//
+// }
 
 #[cfg(test)]
 mod tests {
